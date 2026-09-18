@@ -24,6 +24,8 @@ tr:hover{background:#eef5fc}
 /* 状态单元格颜色 */
 .cell-yes{background-color:#d4edda;color:#155724;font-weight:bold}
 .cell-no{background-color:#f8d7da;color:#721c24;font-weight:bold}
+.load-tip{color:#2980b9;margin:10px 0;font-weight:bold}
+.error-tip{color:#c0392b;margin:10px 0;font-weight:bold}
 @media (max-width:768px){
   .control-panel{flex-direction:column;align-items:stretch}
 }
@@ -31,9 +33,10 @@ tr:hover{background:#eef5fc}
 </head>
 <body>
 <h1>线虫标本物种信息检索引擎</h1>
+<div id="statusTip" class="load-tip">正在自动加载 data.csv 数据……</div>
 
 <div class="upload-area" id="dropZone">
-  <p>拖拽 data.csv 文件到此处，或点击下方选择文件</p>
+  <p>备用：拖拽 data.csv 文件到此处（本地打开网页时使用，GitHub Pages上会自动加载）</p>
   <input type="file" id="fileInput" accept=".csv">
 </div>
 
@@ -54,15 +57,11 @@ tr:hover{background:#eef5fc}
 // ===================== 【配置区，完全匹配你Excel的表头】 =====================
 const CONFIG = {
   columns: ["目","总科","科","属","种","宿主","采集地","编号","标本来源","测序是否成功","是否注释","是否发表文章","排列方式","长度"],
-  // 三级分组下拉筛选
   groupOrderCol: "目",
   groupFamilyCol: "科",
   groupGenusCol: "属",
-  // 所有支持模糊搜索的列
   searchColumns: ["目","总科","科","属","种","宿主","采集地","编号","标本来源","排列方式"],
-  // 需要自动向下填充的分类列（解决Excel合并单元格导出CSV后空值问题）
   fillForwardCols: ["目","总科","科"],
-  // 状态染色列
   statusColumns: ["测序是否成功","是否注释","是否发表文章"]
 };
 // ============================================================================
@@ -71,6 +70,7 @@ let rawData = [];
 let filteredData = [];
 const $ = s => document.querySelector(s);
 const $$ = s => document.querySelectorAll(s);
+const statusTip = $("#statusTip");
 
 // CSV简单解析
 function parseCSV(text){
@@ -125,7 +125,6 @@ function renderTable(data){
     CONFIG.columns.forEach(k=>{
       const td = document.createElement("td");
       td.textContent = row[k] ?? "";
-      // 状态染色
       if(CONFIG.statusColumns.includes(k)){
         if(row[k] === "√") td.className = "cell-yes";
         if(row[k] === "×") td.className = "cell-no";
@@ -144,7 +143,6 @@ function sortTable(key){
   rawData.sort((a,b)=>{
     const av = a[key]||"";
     const bv = b[key]||"";
-    // 长度列按数字排序
     if(key === "长度"){
       const na = Number(av)||0;
       const nb = Number(bv)||0;
@@ -216,21 +214,36 @@ function exportCSV(){
   a.click();
 }
 
-// 加载CSV
-function loadCSV(text){
+// 加载CSV文本并渲染
+function loadCSVData(text){
   const {rows} = parseCSV(text);
-  rawData = forwardFill(rows); // 自动填充合并单元格空值
+  rawData = forwardFill(rows);
   buildGroupSelect(rawData);
   renderHeader();
   applyFilter();
+  statusTip.textContent = `✅ 数据加载成功，共${rawData.length}条标本记录`;
 }
 
-// 事件绑定
+// ===== 核心：自动请求仓库根目录的 data.csv =====
+async function autoLoadCsv(){
+  try{
+    const resp = await fetch("data.csv");
+    if(!resp.ok) throw new Error("文件获取失败");
+    const text = await resp.text();
+    loadCSVData(text);
+  }catch(err){
+    statusTip.textContent = "⚠️ 自动加载失败，请手动拖拽上传data.csv";
+    statusTip.className = "error-tip";
+    console.error(err);
+  }
+}
+
+// 本地文件上传逻辑（备用）
 $("#fileInput").onchange = e=>{
   const f = e.target.files[0];
   if(!f)return;
   const r = new FileReader();
-  r.onload = ev=>loadCSV(ev.target.result);
+  r.onload = ev=>loadCSVData(ev.target.result);
   r.readAsText(f);
 }
 $("#dropZone").ondragover = e=>{e.preventDefault();$("#dropZone").classList.add("active")}
@@ -240,14 +253,19 @@ $("#dropZone").ondrop = e=>{
   const f = e.dataTransfer.files[0];
   if(!f)return;
   const r = new FileReader();
-  r.onload = ev=>loadCSV(ev.target.result);
+  r.onload = ev=>loadCSVData(ev.target.result);
   r.readAsText(f);
 }
+
+// 绑定事件
 $("#search").addEventListener("input", applyFilter);
 $("#filterOrder").addEventListener("change", applyFilter);
 $("#filterFamily").addEventListener("change", applyFilter);
 $("#filterGenus").addEventListener("change", applyFilter);
 $("#exportBtn").onclick = exportCSV;
+
+// 页面加载完成，自动读取csv
+window.onload = autoLoadCsv;
 </script>
 </body>
 </html>
