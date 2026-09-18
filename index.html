@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>线虫标本物种信息检索表</title>
+<style>
+*{box-sizing:border-box;font-family:system-ui, -apple-system, sans-serif;margin:0;padding:0}
+body{padding:16px;max-width:1800px;margin:0 auto}
+h1{margin-bottom:16px;font-size:1.5rem}
+.control-panel{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;align-items:center}
+#search{flex:1;min-width:240px;padding:8px 10px;font-size:1rem;border:1px solid #ccc;border-radius:6px}
+select{padding:8px 10px;font-size:1rem;border:1px solid #ccc;border-radius:6px;min-width:140px}
+button{padding:8px 14px;border-radius:6px;border:none;cursor:pointer;font-size:1rem}
+.export-btn{background:#27ae60;color:#fff}
+.upload-area{border:2px dashed #aaa;padding:20px;border-radius:8px;text-align:center;margin-bottom:16px}
+.upload-area.active{border-color:#2980b9;background:#f0f7ff}
+table{width:100%;border-collapse:collapse;display:block;overflow-x:auto;max-width:100%}
+th,td{border:1px solid #ddd;padding:8px 10px;text-align:left;white-space:nowrap}
+th{background:#2c3e50;color:#fff;cursor:pointer;user-select:none;position:sticky;top:0}
+th:hover{background:#34495e}
+tr:nth-child(even){background:#f8f9fa}
+tr:hover{background:#eef5fc}
+/* 状态单元格颜色 */
+.cell-yes{background-color:#d4edda;color:#155724;font-weight:bold}
+.cell-no{background-color:#f8d7da;color:#721c24;font-weight:bold}
+@media (max-width:768px){
+  .control-panel{flex-direction:column;align-items:stretch}
+}
+</style>
+</head>
+<body>
+<h1>线虫标本物种信息检索引擎</h1>
+
+<div class="upload-area" id="dropZone">
+  <p>拖拽 data.csv 文件到此处，或点击下方选择文件</p>
+  <input type="file" id="fileInput" accept=".csv">
+</div>
+
+<div class="control-panel">
+  <input id="search" placeholder="模糊检索：目、科、属、种、宿主、采集地、编号..." type="text">
+  <select id="filterOrder"><option value="">-- 全部目 --</option></select>
+  <select id="filterFamily"><option value="">-- 全部科 --</option></select>
+  <select id="filterGenus"><option value="">-- 全部属 --</option></select>
+  <button class="export-btn" id="exportBtn">导出筛选结果CSV</button>
+</div>
+
+<table>
+  <thead id="tableHead"></thead>
+  <tbody id="tableBody"></tbody>
+</table>
+
+<script>
+// ===================== 【配置区，完全匹配你Excel的表头】 =====================
+const CONFIG = {
+  columns: ["目","总科","科","属","种","宿主","采集地","编号","标本来源","测序是否成功","是否注释","是否发表文章","排列方式","长度"],
+  // 三级分组下拉筛选
+  groupOrderCol: "目",
+  groupFamilyCol: "科",
+  groupGenusCol: "属",
+  // 所有支持模糊搜索的列
+  searchColumns: ["目","总科","科","属","种","宿主","采集地","编号","标本来源","排列方式"],
+  // 需要自动向下填充的分类列（解决Excel合并单元格导出CSV后空值问题）
+  fillForwardCols: ["目","总科","科"],
+  // 状态染色列
+  statusColumns: ["测序是否成功","是否注释","是否发表文章"]
+};
+// ============================================================================
+
+let rawData = [];
+let filteredData = [];
+const $ = s => document.querySelector(s);
+const $$ = s => document.querySelectorAll(s);
+
+// CSV简单解析
+function parseCSV(text){
+  const lines = text.trim().split(/\r?\n/);
+  const headers = lines[0].split(",");
+  const rows = [];
+  for(let i=1;i<lines.length;i++){
+    const vals = lines[i].split(",");
+    const obj = {};
+    headers.forEach((h,idx)=>obj[h.trim()] = (vals[idx] ?? "").trim());
+    rows.push(obj);
+  }
+  return {headers, rows};
+}
+
+// 合并单元格向下填充（forward fill）
+function forwardFill(rows){
+  const filled = JSON.parse(JSON.stringify(rows));
+  const lastVal = {};
+  CONFIG.fillForwardCols.forEach(c=>lastVal[c]="");
+  for(const r of filled){
+    CONFIG.fillForwardCols.forEach(c=>{
+      if(r[c] === "" || r[c] === null) r[c] = lastVal[c];
+      else lastVal[c] = r[c];
+    })
+  }
+  return filled;
+}
+
+// 渲染表头，绑定点击排序
+function renderHeader(){
+  const thead = $("#tableHead");
+  thead.innerHTML = "";
+  const tr = document.createElement("tr");
+  CONFIG.columns.forEach(h=>{
+    const th = document.createElement("th");
+    th.textContent = h;
+    th.dataset.key = h;
+    th.onclick = ()=>sortTable(h);
+    tr.appendChild(th);
+  })
+  thead.appendChild(tr);
+}
+
+// 渲染表格主体，增加√/×颜色标记
+function renderTable(data){
+  filteredData = data;
+  const tbody = $("#tableBody");
+  tbody.innerHTML = "";
+  data.forEach(row=>{
+    const tr = document.createElement("tr");
+    CONFIG.columns.forEach(k=>{
+      const td = document.createElement("td");
+      td.textContent = row[k] ?? "";
+      // 状态染色
+      if(CONFIG.statusColumns.includes(k)){
+        if(row[k] === "√") td.className = "cell-yes";
+        if(row[k] === "×") td.className = "cell-no";
+      }
+      tr.appendChild(td);
+    })
+    tbody.appendChild(tr);
+  })
+}
+
+// 排序
+let sortKey = null, sortAsc = true;
+function sortTable(key){
+  if(sortKey === key) sortAsc = !sortAsc;
+  else {sortKey=key;sortAsc=true}
+  rawData.sort((a,b)=>{
+    const av = a[key]||"";
+    const bv = b[key]||"";
+    // 长度列按数字排序
+    if(key === "长度"){
+      const na = Number(av)||0;
+      const nb = Number(bv)||0;
+      return sortAsc ? na - nb : nb - na;
+    }
+    return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+  })
+  applyFilter();
+}
+
+// 构建三级下拉选项
+function buildGroupSelect(data){
+  const orderSet = new Set([""]);
+  const familySet = new Set([""]);
+  const genusSet = new Set([""]);
+  data.forEach(r=>{
+    orderSet.add(r[CONFIG.groupOrderCol]);
+    familySet.add(r[CONFIG.groupFamilyCol]);
+    genusSet.add(r[CONFIG.groupGenusCol]);
+  })
+  fillSelect("#filterOrder", orderSet);
+  fillSelect("#filterFamily", familySet);
+  fillSelect("#filterGenus", genusSet);
+}
+function fillSelect(selector, setData){
+  const sel = $(selector);
+  sel.innerHTML = "";
+  [...setData].sort().forEach(v=>{
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.textContent = v || "(空)";
+    sel.appendChild(opt);
+  })
+}
+
+// 筛选逻辑：搜索 + 三级分类筛选
+function applyFilter(){
+  const kw = $("#search").value.toLowerCase().trim();
+  const selOrder = $("#filterOrder").value;
+  const selFamily = $("#filterFamily").value;
+  const selGenus = $("#filterGenus").value;
+
+  const result = rawData.filter(row=>{
+    if(selOrder && row[CONFIG.groupOrderCol] !== selOrder) return false;
+    if(selFamily && row[CONFIG.groupFamilyCol] !== selFamily) return false;
+    if(selGenus && row[CONFIG.groupGenusCol] !== selGenus) return false;
+    if(!kw) return true;
+    return CONFIG.searchColumns.some(col=>{
+      const cell = (row[col]||"").toLowerCase();
+      return cell.includes(kw);
+    })
+  })
+  renderTable(result);
+}
+
+// 导出带BOM的CSV，Excel打开不乱码
+function exportCSV(){
+  if(!filteredData.length) return alert("当前筛选结果为空");
+  const header = CONFIG.columns.join(",");
+  const lines = [header];
+  filteredData.forEach(r=>{
+    const line = CONFIG.columns.map(k=>`"${(r[k]??"").replace(/"/g,'""')}"`).join(",");
+    lines.push(line);
+  })
+  const blob = new Blob(["\uFEFF"+lines.join("\n")],{type:"text/csv;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="线虫标本筛选结果.csv";
+  a.click();
+}
+
+// 加载CSV
+function loadCSV(text){
+  const {rows} = parseCSV(text);
+  rawData = forwardFill(rows); // 自动填充合并单元格空值
+  buildGroupSelect(rawData);
+  renderHeader();
+  applyFilter();
+}
+
+// 事件绑定
+$("#fileInput").onchange = e=>{
+  const f = e.target.files[0];
+  if(!f)return;
+  const r = new FileReader();
+  r.onload = ev=>loadCSV(ev.target.result);
+  r.readAsText(f);
+}
+$("#dropZone").ondragover = e=>{e.preventDefault();$("#dropZone").classList.add("active")}
+$("#dropZone").ondragleave = ()=>$("#dropZone").classList.remove("active");
+$("#dropZone").ondrop = e=>{
+  e.preventDefault();$("#dropZone").classList.remove("active");
+  const f = e.dataTransfer.files[0];
+  if(!f)return;
+  const r = new FileReader();
+  r.onload = ev=>loadCSV(ev.target.result);
+  r.readAsText(f);
+}
+$("#search").addEventListener("input", applyFilter);
+$("#filterOrder").addEventListener("change", applyFilter);
+$("#filterFamily").addEventListener("change", applyFilter);
+$("#filterGenus").addEventListener("change", applyFilter);
+$("#exportBtn").onclick = exportCSV;
+</script>
+</body>
+</html>
